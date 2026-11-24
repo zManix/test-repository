@@ -18,9 +18,10 @@ jobs:
         run: xcodegen generate
       - name: Build
         run: |
+          set -o pipefail
           xcodebuild -project Unscroll.xcodeproj -scheme Unscroll \
             -configuration Release -sdk iphoneos -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY=""
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" 2>&1 | tee build.log
       - name: Package IPA
         run: |
           mkdir Payload
@@ -41,3 +42,15 @@ jobs:
           git add Unscroll.ipa
           git commit -m "Build IPA"
           git push origin HEAD:refs/heads/ipa-unscroll-${{ github.run_number }}
+      - name: Publish build log on failure
+        if: failure()
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          { grep -E "error:" build.log | head -40; echo "-----"; tail -n 60 build.log; } > /tmp/log.txt 2>/dev/null || echo "no build log" > /tmp/log.txt
+          git checkout --orphan log-build
+          git rm -rf . >/dev/null 2>&1 || true
+          cp /tmp/log.txt build-error.txt
+          git add build-error.txt
+          git commit -m "Build log"
+          git push origin HEAD:refs/heads/buildlog-${{ github.run_number }}
