@@ -103,9 +103,18 @@ final class Accounts: ObservableObject {
         if activeID == id, let other = list.first(where: { $0.id != id }) { activeID = other.id }
         list.removeAll(where: { $0.id == id })
         persist()
-        Task { @MainActor in
-            try? await WKWebsiteDataStore.remove(forIdentifier: id)
+        if #available(iOS 17.0, *) {
+            Task { @MainActor in
+                try? await WKWebsiteDataStore.remove(forIdentifier: id)
+            }
         }
+    }
+
+    // The first account uses the plain default storage (safest). Extra accounts get isolated storage.
+    static func dataStore(for id: UUID) -> WKWebsiteDataStore {
+        if id == mainID { return WKWebsiteDataStore.default() }
+        if #available(iOS 17.0, *) { return WKWebsiteDataStore(forIdentifier: id) }
+        return WKWebsiteDataStore.default()
     }
 }
 
@@ -134,6 +143,7 @@ final class Usage: ObservableObject {
     @Published var keepAlive: Bool {
         didSet {
             UserDefaults.standard.set(keepAlive, forKey: "keepAlive")
+            if keepAlive { Notifier.shared.setup() }
             KeepAlive.shared.set(keepAlive)
         }
     }
@@ -154,7 +164,7 @@ final class Usage: ObservableObject {
         sleepOn = d.object(forKey: "sleepOn") as? Bool ?? true
         sleepStart = d.object(forKey: "sleepStart") as? Int ?? 22
         sleepEnd = d.object(forKey: "sleepEnd") as? Int ?? 7
-        keepAlive = d.object(forKey: "keepAlive") as? Bool ?? true
+        keepAlive = d.object(forKey: "keepAlive") as? Bool ?? false
     }
 
     var inSleep: Bool {
@@ -203,14 +213,17 @@ final class Usage: ObservableObject {
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = Notifier()
     private var last: [String: Int] = [:]
+    private var enabled = false
 
     func setup() {
+        enabled = true
         let c = UNUserNotificationCenter.current()
         c.delegate = self
         c.requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
     }
 
     func handle(count: Int, key: String, title: String) {
+        guard enabled else { return }
         guard let prev = last[key] else {
             last[key] = count   // first report is the baseline, no alert
             updateBadge()
@@ -341,8 +354,10 @@ struct RootView: View {
         }
         .background(Color.black.ignoresSafeArea())
         .onAppear {
-            Notifier.shared.setup()
-            KeepAlive.shared.set(usage.keepAlive)
+            if usage.keepAlive {
+                Notifier.shared.setup()
+                KeepAlive.shared.set(true)
+            }
         }
         .onOpenURL { url in
             if let host = url.host, ["instagram", "tiktok", "more"].contains(host) { selection = host }
@@ -400,7 +415,7 @@ struct GroupView: View {
 
             ZStack {
                 ForEach(panes) { pane in
-                    if pane.eager || visited.contains(pane.id) || (active && pane.id == selectedID) {
+                    if (pane.eager && usage.keepAlive) || visited.contains(pane.id) || (active && pane.id == selectedID) {
                         ZStack {
                             WebView(pane: pane, accountID: accounts.activeID, accountName: accounts.active.name)
                                 .id("\(pane.id)-\(accounts.activeID.uuidString)")
@@ -492,7 +507,7 @@ struct SettingsView: View {
                 }
 
                 Section("Message alerts") {
-                    Toggle("Background alerts", isOn: $usage.keepAlive)
+                    Toggle("Background alerts (off by default)", isOn: $usage.keepAlive)
                     Text("Experimental. Plays silence so iOS keeps the app alive and sends a local notification when your unread count goes up. Costs battery and iOS can still stop it. Keep the app in the app switcher, don't swipe it away.")
                         .font(.footnote)
                     Text("Most reliable option: in Safari, open instagram.com, Share, Add to Home Screen, open that icon and allow notifications. Same for tiktok.com.")
@@ -506,7 +521,7 @@ struct SettingsView: View {
 
                 Section("Account data") {
                     Button("Sign out current account everywhere") {
-                        WKWebsiteDataStore(forIdentifier: accounts.activeID)
+                        Accounts.dataStore(for: accounts.activeID)
                             .removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
                                         modifiedSince: .distantPast) {
                                 msg = "Signed out. Restart the app."
@@ -678,7 +693,7 @@ struct WebView: UIViewRepresentable {
         let cfg = WKWebViewConfiguration()
         cfg.allowsInlineMediaPlayback = true
         cfg.mediaTypesRequiringUserActionForPlayback = []
-        cfg.websiteDataStore = WKWebsiteDataStore(forIdentifier: accountID)
+        cfg.websiteDataStore = Accounts.dataStore(for: accountID)
         cfg.userContentController.addUserScript(
             WKUserScript(source: Scripts.source(for: pane),
                          injectionTime: .atDocumentStart,

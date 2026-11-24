@@ -2,7 +2,7 @@ name: Unscroll
 options:
   bundleIdPrefix: com.manaia
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "16.0"
 targets:
   Unscroll:
     type: application
